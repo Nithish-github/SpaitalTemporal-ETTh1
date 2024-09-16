@@ -11,20 +11,38 @@ from IPython import embed
 
 class Informer(nn.Module):
     def __init__(self, enc_in, dec_in, c_out, seq_len, label_len, out_len, 
+                 
                 factor=5, d_model=512, n_heads=8, e_layers=3, d_layers=2, d_ff=512, 
+
                 dropout=0.0, attn='prob', embed='fixed', freq='h', activation='gelu', 
+
                 output_attention = False, distil=True, mix=True,
+
                 device=torch.device('cuda:0')):
+        
         super(Informer, self).__init__()
+
         self.pred_len = out_len
+
         self.attn = attn
+
+
+        self.label_len = label_len    #storing the label length
+
+
+
         self.output_attention = output_attention
 
         # Encoding
         self.enc_embedding = DataEmbedding(enc_in, seq_len, d_model, embed, freq, dropout)
+
         self.dec_embedding = DataEmbedding(dec_in, label_len + out_len, d_model, embed, freq, dropout)
+
+
+
         # Attention
         Attn = ProbAttention if attn=='prob' else FullAttention
+
         # Encoder
         self.encoder = Encoder(
             [
@@ -44,6 +62,8 @@ class Informer(nn.Module):
             ] if distil else None,
             norm_layer=torch.nn.LayerNorm(d_model)
         )
+
+
         # Decoder
         self.decoder = Decoder(
             [
@@ -61,105 +81,33 @@ class Informer(nn.Module):
             ],
             norm_layer=torch.nn.LayerNorm(d_model)
         )
-        # self.end_conv1 = nn.Conv1d(in_channels=label_len+out_len, out_channels=out_len, kernel_size=1, bias=True)
-        # self.end_conv2 = nn.Conv1d(in_channels=d_model, out_channels=c_out, kernel_size=1, bias=True)
-        self.projection = nn.Linear(d_model, c_out, bias=True)  #可以改成1*1 conv試看看
+
+        self.projection = nn.Linear(d_model, c_out, bias=True)
         
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, #process的batch_x, batch_x_mark, dec_inp, batch_y_mark
-                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec,enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None):
+        
         enc_out = self.enc_embedding(x_enc, x_mark_enc) #enc_out:(32,seq_len,512)
 
         enc_out, attns = self.encoder(enc_out, attn_mask=enc_self_mask) #enc_out:(32,pred_len,512) 
         
-        dec_out = self.dec_embedding(x_dec, x_mark_dec) #x_dec為mask掉pred_len（只有label_len)當decoder input,x_mark_dec為pred的timestamp
-        #(batch, pred_len+label_len,512)
-        dec_out = self.decoder(dec_out, enc_out, x_mask=dec_self_mask, cross_mask=dec_enc_mask) 
-        #(batch, pred_len+label_len,512)
-        dec_out = self.projection(dec_out)
-        #(batch,pred_len+label_len,1)
-        
-
-        # dec_out = self.end_conv1(dec_out)
-        # dec_out = self.end_conv2(dec_out.transpose(2,1)).transpose(1,2)
-        if self.output_attention:
-            return dec_out[:,-self.pred_len:,:], attns
-        else:
-            return dec_out[:,-self.pred_len:,:] # [B, L, D] #(batch,pred_len,1)
-        
-
-
-class InformerStack(nn.Module):
-    def __init__(self, enc_in, dec_in, c_out, seq_len, label_len, out_len, 
-                factor=5, d_model=512, n_heads=8, e_layers=[3,2,1], d_layers=2, d_ff=512, 
-                dropout=0.0, attn='prob', embed='fixed', freq='h', activation='gelu',
-                output_attention = False, distil=True, mix=True,
-                device=torch.device('cuda:0')):
-        super(InformerStack, self).__init__()
-        self.pred_len = out_len
-        self.attn = attn
-        self.output_attention = output_attention
-
-        # Encoding
-        self.enc_embedding = DataEmbedding(enc_in, d_model, embed, freq, dropout)
-        self.dec_embedding = DataEmbedding(dec_in, d_model, embed, freq, dropout)
-        # Attention
-        Attn = ProbAttention if attn=='prob' else FullAttention
-        # Encoder
-
-        inp_lens = list(range(len(e_layers))) # [0,1,2,...] you can customize here
-        encoders = [
-            Encoder(
-                [
-                    EncoderLayer(
-                        AttentionLayer(Attn(False, factor, attention_dropout=dropout, output_attention=output_attention), 
-                                    d_model, n_heads, mix=False),
-                        d_model,
-                        d_ff,
-                        dropout=dropout,
-                        activation=activation
-                    ) for l in range(el)
-                ],
-                [
-                    ConvLayer(
-                        d_model
-                    ) for l in range(el-1)
-                ] if distil else None,
-                norm_layer=torch.nn.LayerNorm(d_model)
-            ) for el in e_layers]
-        self.encoder = EncoderStack(encoders, inp_lens)
-        # Decoder
-        self.decoder = Decoder(
-            [
-                DecoderLayer(
-                    AttentionLayer(Attn(True, factor, attention_dropout=dropout, output_attention=False), 
-                                d_model, n_heads, mix=mix),
-                    AttentionLayer(FullAttention(False, factor, attention_dropout=dropout, output_attention=False), 
-                                d_model, n_heads, mix=False),
-                    d_model,
-                    d_ff,
-                    dropout=dropout,
-                    activation=activation,
-                )
-                for l in range(d_layers)
-            ],
-            norm_layer=torch.nn.LayerNorm(d_model)
-        )
-        # self.end_conv1 = nn.Conv1d(in_channels=label_len+out_len, out_channels=out_len, kernel_size=1, bias=True)
-        # self.end_conv2 = nn.Conv1d(in_channels=d_model, out_channels=c_out, kernel_size=1, bias=True)
-        self.projection = nn.Linear(d_model, c_out, bias=True)
-        
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, 
-                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None):
-        enc_out = self.enc_embedding(x_enc, x_mark_enc)
-        enc_out, attns = self.encoder(enc_out, attn_mask=enc_self_mask)
-
         dec_out = self.dec_embedding(x_dec, x_mark_dec)
-        dec_out = self.decoder(dec_out, enc_out, x_mask=dec_self_mask, cross_mask=dec_enc_mask)
-        dec_out = self.projection(dec_out)
-        
-        # dec_out = self.end_conv1(dec_out)
-        # dec_out = self.end_conv2(dec_out.transpose(2,1)).transpose(1,2)
+
+        # Autoregressive decoding loop for generating additional 90 tokens
+        for i in range(self.label_len-1):
+            # print("Inside loop")
+            # Pass current decoder output (dec_out) and encoder context (enc_out)
+            dec_out_step = self.decoder(dec_out, enc_out, x_mask=dec_self_mask, cross_mask=dec_enc_mask)
+            # Take the last predicted token and use it for the next input step
+            dec_out = torch.cat([dec_out, dec_out_step[:, -self.label_len:, :]], dim=1)  # Concatenate the new token [batch_size, current_len + 1, d_model]
+
+
+        # Once the full sequence is generated, project it to the desired output dimension (e.g., 1)
+        final_out = self.projection(dec_out)  # Project to [batch_size, pred_len, c_out]
+
+
         if self.output_attention:
-            return dec_out[:,-self.pred_len:,:], attns
+            return final_out, attns
         else:
-            return dec_out[:,-self.pred_len:,:] # [B, L, D]
+            return final_out # [B, L, D] #(batch,pred_len,1)
+        
+
